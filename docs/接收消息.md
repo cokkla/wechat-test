@@ -1,0 +1,409 @@
+回调事件
+接收并解析事件的方法见：回调配置。
+示例
+
+<xml>
+   <ToUserName><![CDATA[ww12345678910]]></ToUserName>
+   <CreateTime>1348831860</CreateTime>
+   <MsgType><![CDATA[event]]></MsgType>
+   <Event><![CDATA[kf_msg_or_event]]></Event>
+   <Token><![CDATA[ENCApHxnGDNAVNY4AaSJKj4Tb5mwsEMzxhFmHVGcra996NR]]></Token>
+   <OpenKfId><![CDATA[wkxxxxxxx]]></OpenKfId>
+</xml>
+说明
+
+参数	说明
+ToUserName	微信客服企业ID
+CreateTime	消息创建时间，unix时间戳
+MsgType	消息的类型，此时固定为 event
+Event	事件的类型，此时固定为 kf_msg_or_event
+Token	调用拉取消息接口时，需要传此token，用于校验请求的合法性
+OpenKfId	有新消息的客服账号。可通过sync_msg接口指定open_kfid获取此客服账号的消息
+获取消息
+客户主动发给微信客服的消息、发送消息接口发送失败事件（如被用户拒收）、客户点击菜单消息的回复消息，可以通过该接口获取具体的消息内容和事件。不支持获取通过接口发送的消息。
+支持的消息类型：文本、图片、语音、视频、文件、位置、事件。
+
+图片、语音、视频、文件消息的媒体文件有如下大小限制，超出会获取到文本提示消息：
+
+图片：2MB
+语音：2MB
+视频：10MB
+文件：20MB
+接口定义
+请求方式: POST(HTTPS)
+
+请求地址: https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=ACCESS_TOKEN
+
+请求示例
+
+{
+    "cursor": "4gw7MepFLfgF2VC5npN",
+    "token": "ENCApHxnGDNAVNY4AaSJKj4Tb5mwsEMzxhFmHVGcra996NR",
+    "limit": 1000,
+    "voice_format": 0,
+    "open_kfid": "wkxxxxxx"
+}
+参数说明:
+
+参数	必须	类型	说明
+access_token	是	string	调用接口凭证
+cursor	否	string	上一次调用时返回的next_cursor，第一次拉取可以不填。
+不多于64字节
+token	否	string	回调事件返回的token字段，10分钟内有效；可不填，如果不填接口有严格的频率限制。
+不多于128字节
+limit	否	uint32	期望请求的数据量，默认值和最大值都为1000。
+注意：可能会出现返回条数少于limit的情况，需结合返回的has_more字段判断是否继续请求。
+voice_format	否	uint32	语音消息类型，0-Amr 1-Silk，默认0。可通过该参数控制返回的语音格式
+open_kfid	否	string	指定拉取某个客服账号的消息，否则默认返回所有客服账号的消息。
+ 
+
+权限说明:
+仅允许微信客服的Secret所获取的access_token调用。
+
+返回结果:
+
+{
+    "errcode": 0,
+    "errmsg": "ok",
+    "next_cursor": "4gw7MepFLfgF2VC5npN",
+    "has_more": 1,
+    "msg_list": [
+        {
+            "msgid": "from_msgid_4622416642169452483",
+            "open_kfid": "wkAJ2GCAAASSm4_FhToWMFea0xAFfd3Q",
+            "external_userid": "wmAJ2GCAAAme1XQRC-NI-q0_ZM9ukoAw",
+            "send_time": 1615478585,
+            "origin": 3,
+            "msgtype": "MSG_TYPE"
+        }
+    ]
+}
+参数说明:
+
+参数	类型	说明
+errcode	int32	返回码
+errmsg	string	错误码描述
+next_cursor	string	下次调用带上该值，则从当前的位置继续往后拉，以实现增量拉取。
+强烈建议对该字段入库保存，每次请求读取带上，请求结束后更新。避免因意外丢，导致必须从头开始拉取，引起消息延迟。
+has_more	uint32	是否还有更多数据。0-否；1-是。
+不能通过判断msg_list是否空来停止拉取，可能会出现has_more为1，而msg_list为空的情况
+msg_list	obj[]	消息列表
+msg_list.msgid	string	消息ID
+msg_list.open_kfid	string	客服账号ID
+msg_list.external_userid	string	客户UserID
+msg_list.send_time	uint64	消息发送时间
+msg_list.origin	uint32	消息来源。3-客户回复的消息 4-系统推送的消息
+msg_list.msgtype	string	对不同的msgtype，有相应的结构描述，下面进一步说明
+消息类型
+文本消息
+返回示例：
+
+{
+   "msgtype" : "text",
+   "text" : {
+        "content" : "hello world",
+        "menu_id" : "MENU_ID"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：text
+text	obj	文本消息
+text.content	string	文本内容
+text.menu_id	string	客户点击菜单消息，触发的回复消息中附带的菜单ID
+图片消息
+返回示例：
+
+{
+   "msgtype" : "image",
+   "image" : {
+        "media_id" : "2iSLeVyqzk4eX0IB5kTi9Ljfa2rt9dwfq5WKRQ4Nvvgw"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：image
+image	obj	图片消息
+image.media_id	string	图片文件id
+语音消息
+返回示例：
+
+{
+   "msgtype" : "voice",
+   "voice" : {
+        "media_id" : "2iSLeVyqzk4eX0IB5kTi9Ljfa2rt9dwfq5WKRQ4Nvvgw"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：voice
+voice	obj	语音消息
+voice.media_id	string	语音文件ID
+视频消息
+返回示例：
+
+{
+   "msgtype" : "video",
+   "video" : {
+        "media_id" : "2iSLeVyqzk4eX0IB5kTi9Ljfa2rt9dwfq5WKRQ4Nvvgw"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：video
+video	obj	视频消息
+video.media_id	string	文件id
+文件消息
+返回示例：
+
+{
+   "msgtype" : "file",
+   "file" : {
+        "media_id" : "2iSLeVyqzk4eX0IB5kTi9Ljfa2rt9dwfq5WKRQ4Nvvgw"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：file
+file	obj	文件消息
+file.media_id	string	文件id
+位置消息
+返回示例：
+
+{
+   "msgtype" : "location",
+   "location" : {
+        "latitude": 23.106021881103501,
+        "longitude": 113.320503234863,
+        "name": "广州国际媒体港(广州市海珠区)",
+        "address": "广东省广州市海珠区滨江东路"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：location
+location	obj	地理位置消息
+location.latitude	float	纬度
+location.longitude	float	经度
+location.name	string	位置名
+location.address	string	地址详情说明
+小程序消息
+返回示例：
+
+{
+   "msgtype" : "miniprogram",
+   "miniprogram" : {
+		"title": "TITLE",
+		"appid": "APPID",
+		"pagepath": "PAGE_PATH",
+		"thumb_media_id": "THUMB_MEDIA_ID"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：miniprogram
+miniprogram	obj	小程序消息
+miniprogram.title	string	标题
+miniprogram.appid	string	小程序appid
+miniprogram.pagepath	string	点击消息卡片后进入的小程序页面路径
+miniprogram.thumb_media_id	string	小程序消息封面的mediaid
+视频号商品消息
+返回示例：
+
+{
+   "msgtype" : "channels_shop_product",
+   "channels_shop_product" : {
+		"product_id": "PRODUCT_ID",
+		"head_image": "HEAD_IMAGE",
+		"title": "TITLE",
+		"sales_price": "SALES_PRICE",
+		"shop_nickname": "SHOP_NICKNAME",
+		"shop_head_image": "SHOP_HEAD_IMAGE"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：channels_shop_product
+channels_shop_product	obj	视频号商品消息
+channels_shop_product.product_id	string	商品ID
+channels_shop_product.head_image	string	商品图片
+channels_shop_product.title	string	商品标题
+channels_shop_product.sales_price	string	商品价格，以分为单位
+channels_shop_product.shop_nickname	string	店铺名称
+channels_shop_product.shop_head_image	string	店铺头像
+视频号订单消息
+返回示例：
+
+{
+   "msgtype" : "channels_shop_order",
+   "channels_shop_order" : {
+		"order_id": "ORDER_ID",
+		"product_titles":"PRODUCT_TITLES",
+		"price_wording":"PRICE_WORDING",
+		"state":"STATE",
+		"image_url":"IMAGE_URL",
+		"shop_nickname":"SHOP_NICKNAME"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：channels_shop_order
+channels_shop_order	obj	视频号订单消息
+channels_shop_order.order_id	string	订单号
+channels_shop_order.product_titles	string	商品标题
+channels_shop_order.price_wording	string	订单价格描述
+channels_shop_order.state	string	订单状态
+channels_shop_order.image_url	string	订单缩略图
+channels_shop_order.shop_nickname	string	店铺名称
+聊天记录消息
+返回示例：
+
+{
+   "msgtype" : "merged_msg",
+   "merged_msg": {
+    "title": "群聊的聊天记录",
+                "item": [
+                    {
+                        "send_time": 1665649618,
+                        "msgtype": "text",
+                        "sender_name": "发送者",
+                        "msg_content": "{\"msgtype\":\"text\",\"text\":{\"content\":\"消息内容\"}}"
+                    }
+                ]
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：merged_msg
+merged_msg	obj	聊天记录消息
+merged_msg.title	string	聊天记录标题
+merged_msg.item	obj[]	消息记录内的消息内容
+merged_msg.item.send_time	uint32	发送事件
+merged_msg.item.msgtype	uint32	消息类型
+merged_msg.item.sender_name	uint32	发送者名称
+merged_msg.item.msg_content	string	消息内容，Json字符串，结构可参考本文档消息类型说明
+视频号消息
+返回示例：
+
+{
+   "msgtype" : "channels",
+   "channels" : {
+      "sub_type": 1,
+	  		"nickname": "视频号名称",
+			"title": "动态标题"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：channels
+目前仅部分返回详细消息内容。
+channels	obj	视频号消息
+channels. sub_type	uint32	视频号消息类型，1视频号动态、2视频号直播、3视频号名片
+channels. nickname	string	视频号名称
+channels. title	string	视频号动态标题，视频号消息类型为“1视频号动态”时，返回动态标题
+笔记消息
+返回示例：
+
+{
+   "msgtype" : "note"
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：note
+目前暂不返回详细消息内容。
+事件消息
+用户进入会话事件
+返回示例：
+
+{
+   "msgtype" : "event",
+   "event" : {
+        "event_type": "enter_session",
+        "open_kfid": "wkAJ2GCAAASSm4_FhToWMFea0xAFfd3Q",
+        "external_userid": "wmAJ2GCAAAme1XQRC-NI-q0_ZM9ukoAw",
+        "scene": "123",
+        "scene_param": "abc",
+        "welcome_code": "aaaaaa",
+        "wechat_channels": {
+            "nickname": "进入会话的视频号名称",
+            "scene":1
+        }
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：event
+event	obj	事件消息
+event.event_type	string	事件类型。此处固定为：enter_session
+event.open_kfid	string	客服账号ID
+event.external_userid	string	客户UserID
+event.scene	string	进入会话的场景值，获取客服账号链接开发者自定义的场景值
+event.scene_param	string	进入会话的自定义参数，获取客服账号链接返回的url，开发者按规范拼接的scene_param参数
+event.welcome_code	string	如果满足发送欢迎语条件（条件为：用户在过去48小时里未收过欢迎语，且未向客服发过消息），会返回该字段。
+可用该welcome_code调用发送事件响应消息接口给客户发送欢迎语。
+event.wechat_channels	obj	进入会话的视频号信息，从视频号进入会话才有值
+event.wechat_channels.nickname	string	视频号名称，视频号场景值为1、2、3时返回此项
+event.wechat_channels.shop_nickname	string	视频号小店名称，视频号场景值为4、5时返回此项
+event.wechat_channels.scene	uint32	视频号场景值。1：视频号主页，2：视频号直播间商品列表页，3：视频号商品橱窗页，4：视频号小店商品详情页，5：视频号小店订单页
+ 
+
+消息发送失败事件
+返回示例：
+
+{
+   "msgtype" : "event",
+   "event" : {
+        "event_type": "msg_send_fail",
+        "open_kfid": "wkAJ2GCAAASSm4_FhToWMFea0xAFfd3Q",
+        "external_userid": "wmAJ2GCAAAme1XQRC-NI-q0_ZM9ukoAw",
+        "fail_msgid": "FAIL_MSGID",
+        "fail_type": 4
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：event
+event	obj	事件消息
+event.event_type	string	事件类型。此处固定为：msg_send_fail
+event.open_kfid	string	客服账号ID
+event.external_userid	string	客户UserID
+event.fail_msgid	string	发送失败的消息msgid
+event.fail_type	uint32	失败类型。0-未知原因 10-用户拒收 11-企业未有成员登录企业微信App（排查方法：企业至少一个成员通过手机号验证/微信授权登录企业微信App即可）13-安全限制
+ 
+
+用户撤回消息事件
+返回示例：
+
+{
+   "msgtype" : "event",
+   "event" : {
+        "event_type": "user_recall_msg",
+        "open_kfid": "wkAJ2GCAAASSm4_FhToWMFea0xAFfd3Q",
+        "external_userid": "wmAJ2GCAAAme1XQRC-NI-q0_ZM9ukoAw",
+        "recall_msgid": "RECALL_MSGID"
+   }
+}
+参数说明：
+
+参数	类型	说明
+msgtype	string	消息类型，此时固定为：event
+event	obj	事件消息
+event.event_type	string	事件类型。此处固定为：user_recall_msg
+event.open_kfid	string	客服账号ID
+event.external_userid	string	客户UserID
+event.recall_msgid	string	撤回的消息msgid
+ 

@@ -4,6 +4,7 @@ import json
 import os
 import struct
 import time
+from io import BytesIO
 
 import pytest
 from Crypto.Cipher import AES
@@ -56,6 +57,7 @@ def reset_state():
     server._token_cache["access_token"] = None
     server._token_cache["expires_at"] = 0.0
     server._cursor_store.clear()
+    server._used_upload_tokens.clear()
     yield
 
 
@@ -72,6 +74,156 @@ class TestAesRoundTrip:
     def test_encrypt_then_decrypt_returns_original(self):
         encrypt = _aes_encrypt(server.ENCODING_AES_KEY, "hello world")
         assert server._aes_decrypt(server.ENCODING_AES_KEY, encrypt) == "hello world"
+
+
+class TestServeFile:
+    def test_serves_existing_file(self, client, mocker, tmp_path):
+        mocker.patch("server.FILES_DIR", str(tmp_path))
+        (tmp_path / "a.pdf").write_bytes(b"pdf-content")
+
+        resp = client.get("/files/a.pdf")
+
+        assert resp.status_code == 200
+        assert resp.data == b"pdf-content"
+
+    def test_rejects_path_traversal(self, client, mocker, tmp_path):
+        mocker.patch("server.FILES_DIR", str(tmp_path))
+        (tmp_path / "a.pdf").write_bytes(b"pdf-content")
+
+        resp = client.get("/files/..%2f..%2fserver.py")
+
+        assert resp.status_code in (400, 404)
+
+    def test_returns_404_for_missing_file(self, client, mocker, tmp_path):
+        mocker.patch("server.FILES_DIR", str(tmp_path))
+
+        resp = client.get("/files/missing.pdf")
+
+        assert resp.status_code == 404
+
+
+class TestUploadToken:
+    def test_load_valid_token_returns_data(self):
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        result = server._load_upload_token(token)
+
+        assert result["valid"] is True
+        assert result["external_userid"] == "wmUser1"
+        assert result["open_kfid"] == "wkxxxxxxx"
+
+    def test_load_tampered_token_is_invalid(self):
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        result = server._load_upload_token(token + "tampered")
+
+        assert result["valid"] is False
+
+    def test_load_expired_token_is_invalid(self, mocker):
+        mocker.patch.object(server.config, "UPLOAD_TOKEN_MAX_AGE", -1)
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        result = server._load_upload_token(token)
+
+        assert result["valid"] is False
+        assert "过期" in result["error"]
+
+    def test_used_token_is_rejected(self):
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+        server._mark_upload_token_used(token)
+
+        result = server._load_upload_token(token)
+
+        assert result["valid"] is False
+        assert "已被使用" in result["error"]
+
+
+class TestSafeUploadFilename:
+    def test_keeps_chinese_characters(self):
+        assert server._safe_upload_filename("尽调报告.pdf") == "尽调报告.pdf"
+
+    def test_strips_path_separators(self):
+        assert "/" not in server._safe_upload_filename("../../etc/passwd")
+        assert "\\" not in server._safe_upload_filename("..\\..\\windows\\system32\\evil.exe")
+
+    def test_empty_name_falls_back(self):
+        assert server._safe_upload_filename("...") == "unnamed"
+
+
+class TestUploadEndpoint:
+    def test_upload_form_rejects_invalid_token(self, client):
+        resp = client.get("/upload/not-a-real-token")
+
+        assert resp.status_code == 403
+
+    def test_upload_form_accepts_valid_token(self, client):
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        resp = client.get(f"/upload/{token}")
+
+        assert resp.status_code == 200
+        assert "上传" in resp.data.decode("utf-8")
+
+    def test_upload_file_saves_and_notifies(self, client, mocker, tmp_path):
+        mocker.patch.object(server, "UPLOADS_DIR", str(tmp_path))
+        mock_send = mocker.patch("server.send_text_msg")
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        resp = client.post(
+            f"/upload/{token}",
+            data={"file": (BytesIO(b"file-bytes"), "report.pdf")},
+            content_type="multipart/form-data",
+        )
+
+        assert resp.status_code == 200
+        saved_files = list(tmp_path.iterdir())
+        assert len(saved_files) == 1
+        assert saved_files[0].name.startswith("report_")
+        mock_send.assert_called_once()
+        _, args, _ = mock_send.mock_calls[0]
+        assert args[0] == "wmUser1"
+        assert args[1] == "wkxxxxxxx"
+
+    def test_upload_file_rejects_reused_token(self, client, mocker, tmp_path):
+        mocker.patch.object(server, "UPLOADS_DIR", str(tmp_path))
+        mocker.patch("server.send_text_msg")
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        client.post(
+            f"/upload/{token}",
+            data={"file": (BytesIO(b"file-bytes"), "report.pdf")},
+            content_type="multipart/form-data",
+        )
+        resp2 = client.post(
+            f"/upload/{token}",
+            data={"file": (BytesIO(b"file-bytes-2"), "report2.pdf")},
+            content_type="multipart/form-data",
+        )
+
+        assert resp2.status_code == 403
+
+    def test_upload_file_without_file_returns_400(self, client):
+        token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+        resp = client.post(f"/upload/{token}", data={}, content_type="multipart/form-data")
+
+        assert resp.status_code == 400
+
+    def test_upload_file_too_large_returns_413(self, client):
+        original = server.app.config["MAX_CONTENT_LENGTH"]
+        server.app.config["MAX_CONTENT_LENGTH"] = 10
+        try:
+            token = server._make_upload_token("wmUser1", "wkxxxxxxx")
+
+            resp = client.post(
+                f"/upload/{token}",
+                data={"file": (BytesIO(b"x" * 1000), "big.bin")},
+                content_type="multipart/form-data",
+            )
+
+            assert resp.status_code == 413
+        finally:
+            server.app.config["MAX_CONTENT_LENGTH"] = original
 
 
 class TestVerifyEndpoint:
@@ -333,8 +485,7 @@ class TestDownloadMedia:
         result = server.download_media("media123", save_dir=str(tmp_path))
 
         assert result["success"] is True
-        assert result["filename"].startswith("test_")
-        assert result["filename"].endswith(".png")
+        assert result["filename"] == "test.png"
         assert result["size"] == 13
         assert os.path.exists(result["filepath"])
 
@@ -360,7 +511,57 @@ class TestDownloadMedia:
         result = server.download_media("media_long_id_12345", save_dir=str(tmp_path))
 
         assert result["success"] is True
-        assert result["filename"].startswith("media_long_id_12")
+        assert result["filename"].endswith(".amr")
+
+
+class TestUploadAndSendFile:
+    def test_upload_temp_media_returns_media_id(self, mocker, tmp_path):
+        mocker.patch("server.get_access_token", return_value="tok")
+        sample_file = tmp_path / "sample.pdf"
+        sample_file.write_bytes(b"fake pdf content")
+        mock_post = mocker.patch("server.requests.post")
+        mock_post.return_value.json.return_value = {"errcode": 0, "media_id": "media_abc"}
+
+        media_id = server.upload_temp_media(str(sample_file))
+
+        assert media_id == "media_abc"
+        _, kwargs = mock_post.call_args
+        assert kwargs["params"]["type"] == "file"
+
+    def test_upload_temp_media_raises_on_error(self, mocker, tmp_path):
+        mocker.patch("server.get_access_token", return_value="tok")
+        sample_file = tmp_path / "sample.pdf"
+        sample_file.write_bytes(b"fake pdf content")
+        mock_post = mocker.patch("server.requests.post")
+        mock_post.return_value.json.return_value = {"errcode": 40004, "errmsg": "invalid media type"}
+
+        with pytest.raises(RuntimeError):
+            server.upload_temp_media(str(sample_file))
+
+    def test_send_link_msg_sends_expected_payload(self, mocker):
+        mocker.patch("server.get_access_token", return_value="tok")
+        mock_post = mocker.patch("server.requests.post")
+        mock_post.return_value.json.return_value = {"errcode": 0, "errmsg": "ok", "msgid": "m1"}
+
+        result = server.send_link_msg(
+            "wmUser1", "wkxxxxxxx", "标题", "描述", "https://example.com/files/a.pdf", "thumb_abc"
+        )
+
+        assert result["msgid"] == "m1"
+        _, kwargs = mock_post.call_args
+        assert kwargs["json"]["msgtype"] == "link"
+        assert kwargs["json"]["link"]["url"] == "https://example.com/files/a.pdf"
+        assert kwargs["json"]["link"]["thumb_media_id"] == "thumb_abc"
+
+    def test_send_link_msg_raises_on_error(self, mocker):
+        mocker.patch("server.get_access_token", return_value="tok")
+        mock_post = mocker.patch("server.requests.post")
+        mock_post.return_value.json.return_value = {"errcode": 95003, "errmsg": "not allow to send message"}
+
+        with pytest.raises(RuntimeError):
+            server.send_link_msg(
+                "wmUser1", "wkxxxxxxx", "标题", "描述", "https://example.com/files/a.pdf", "thumb_abc"
+            )
 
 
 class TestFileMessageHandling:
@@ -484,6 +685,175 @@ class TestFileMessageHandling:
         _, args, _ = mock_send.mock_calls[0]
         assert "文件接收失败" in args[2]
 
+    def test_trigger_keyword_pushes_link_and_sends_no_text_reply(self, mocker):
+        mocker.patch("server.config.PUBLIC_BASE_URL", "https://example.com")
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_trigger_1",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": server.config.PUSH_FILE_TRIGGER},
+                }
+            ],
+        )
+        mock_upload = mocker.patch("server.upload_temp_media", return_value="thumb_media_1")
+        mock_send_link = mocker.patch("server.send_link_msg", return_value={"errcode": 0, "msgid": "m1"})
+        mock_send_text = mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        mock_upload.assert_called_once_with(server.config.PUSH_LINK_THUMB_PATH, media_type="image")
+        expected_filename = os.path.basename(server.config.PUSH_FILE_PATH)
+        mock_send_link.assert_called_once_with(
+            "wmUser1",
+            "wkxxxxxxx",
+            server.config.PUSH_LINK_TITLE,
+            server.config.PUSH_LINK_DESC,
+            f"https://example.com/files/{expected_filename}",
+            "thumb_media_1",
+        )
+        mock_send_text.assert_not_called()
+
+    def test_trigger_keyword_push_failure_replies_error_text(self, mocker):
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_trigger_2",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": server.config.PUSH_FILE_TRIGGER},
+                }
+            ],
+        )
+        mocker.patch("server.upload_temp_media", side_effect=RuntimeError("media upload failed: boom"))
+        mock_send_text = mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        _, args, _ = mock_send_text.mock_calls[0]
+        assert "文件推送失败" in args[2]
+
+    def test_non_trigger_text_message_does_not_push_file(self, mocker):
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_msg_2",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": "随便说点什么"},
+                }
+            ],
+        )
+        mock_upload = mocker.patch("server.upload_temp_media")
+        mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        mock_upload.assert_not_called()
+
+    def test_upload_trigger_keyword_pushes_upload_link(self, mocker):
+        mocker.patch.object(server.config, "PUBLIC_BASE_URL", "https://example.com")
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_upload_trigger_1",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": server.config.UPLOAD_TRIGGER},
+                }
+            ],
+        )
+        mocker.patch("server.upload_temp_media", return_value="thumb_media_2")
+        mock_make_token = mocker.patch("server._make_upload_token", return_value="tok123")
+        mock_send_link = mocker.patch("server.send_link_msg", return_value={"errcode": 0, "msgid": "m1"})
+        mock_send_text = mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        mock_make_token.assert_called_once_with("wmUser1", "wkxxxxxxx")
+        mock_send_link.assert_called_once_with(
+            "wmUser1",
+            "wkxxxxxxx",
+            server.config.UPLOAD_LINK_TITLE,
+            server.config.UPLOAD_LINK_DESC,
+            "https://example.com/upload/tok123",
+            "thumb_media_2",
+        )
+        mock_send_text.assert_not_called()
+
+    def test_upload_trigger_failure_replies_error_text(self, mocker):
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_upload_trigger_2",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": server.config.UPLOAD_TRIGGER},
+                }
+            ],
+        )
+        mocker.patch("server.upload_temp_media", side_effect=RuntimeError("media upload failed: boom"))
+        mock_send_text = mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        _, args, _ = mock_send_text.mock_calls[0]
+        assert "上传链接生成失败" in args[2]
+
+    def test_reply_delay_sleeps_before_sending(self, mocker):
+        mocker.patch.object(server.config, "REPLY_DELAY_SECONDS", 5)
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_msg_delay_1",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": "hello"},
+                }
+            ],
+        )
+        mock_sleep = mocker.patch("server.time.sleep")
+        mock_send = mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        mock_sleep.assert_called_once_with(5)
+        mock_send.assert_called_once()
+
+    def test_no_delay_when_zero(self, mocker):
+        mocker.patch.object(server.config, "REPLY_DELAY_SECONDS", 0)
+        mocker.patch(
+            "server.sync_msg",
+            return_value=[
+                {
+                    "msgid": "txt_msg_delay_2",
+                    "external_userid": "wmUser1",
+                    "origin": 3,
+                    "msgtype": "text",
+                    "text": {"content": "hello"},
+                }
+            ],
+        )
+        mock_sleep = mocker.patch("server.time.sleep")
+        mocker.patch("server.send_text_msg")
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        mock_sleep.assert_not_called()
+
     def test_text_message_does_not_download(self, mocker):
         mocker.patch(
             "server.sync_msg",
@@ -503,3 +873,97 @@ class TestFileMessageHandling:
         server._handle_kf_event("kftoken", "wkxxxxxxx")
 
         mock_download.assert_not_called()
+
+
+class TestTaskFlow:
+    def setup_method(self):
+        server._tasks_by_user.clear()
+
+    def _sync_msg_with(self, content):
+        return [
+            {
+                "msgid": "task_msg_1",
+                "external_userid": "wmUser1",
+                "origin": 3,
+                "msgtype": "text",
+                "text": {"content": content},
+            }
+        ]
+
+    def test_task_trigger_creates_task_and_pushes_progress_then_result(self, mocker):
+        mocker.patch("server.sync_msg", return_value=self._sync_msg_with("开始任务：查询阿里巴巴公司"))
+        mock_sleep = mocker.patch("server.time.sleep")
+        mock_send = mocker.patch("server.send_text_msg", return_value={"errcode": 0, "msgid": "m1"})
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        sent_texts = [call.args[2] for call in mock_send.mock_calls]
+        assert sent_texts == [
+            "收到任务",
+            "正在检索本地信息...",
+            "正在处理信息...",
+            "信息不足，正在联网搜索信息作为补充...",
+            "信息收集完毕，开始汇总...",
+            "查询阿里巴巴公司任务已完成",
+        ]
+        # 5 条进度间隔 + 1 次任务处理延迟
+        assert mock_sleep.call_count == 6
+        mock_sleep.assert_any_call(server.config.TASK_PROCESS_DELAY_SECONDS)
+
+        tasks = server._tasks_by_user["wmUser1"]
+        assert len(tasks) == 1
+        assert tasks[0]["status"] == "pushed"
+        assert tasks[0]["content"] == "查询阿里巴巴公司"
+
+    def test_task_marked_push_failed_when_result_push_fails(self, mocker):
+        mocker.patch("server.sync_msg", return_value=self._sync_msg_with("开始任务：查询阿里巴巴公司"))
+        mocker.patch("server.time.sleep")
+        # 前 5 条进度消息成功，最后一条结果推送失败（模拟窗口关闭/配额耗尽）
+        mocker.patch(
+            "server.send_text_msg",
+            side_effect=[None, None, None, None, None, RuntimeError("send_msg failed: window closed")],
+        )
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        tasks = server._tasks_by_user["wmUser1"]
+        assert tasks[0]["status"] == "push_failed"
+
+    def test_next_message_auto_pushes_failed_task_result(self, mocker):
+        mocker.patch("server.time.sleep")
+        task = server._create_task("wmUser1", "查询阿里巴巴公司")
+        task["status"] = "push_failed"
+
+        mocker.patch("server.sync_msg", return_value=self._sync_msg_with("你好"))
+        mock_send = mocker.patch("server.send_text_msg", return_value={"errcode": 0, "msgid": "m1"})
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        sent_texts = [call.args[2] for call in mock_send.mock_calls]
+        assert "查询阿里巴巴公司任务已完成" in sent_texts
+        assert task["status"] == "pushed"
+
+    def test_next_message_retry_push_failure_keeps_status(self, mocker):
+        mocker.patch("server.time.sleep")
+        task = server._create_task("wmUser1", "查询阿里巴巴公司")
+        task["status"] = "push_failed"
+
+        mocker.patch("server.sync_msg", return_value=self._sync_msg_with("你好"))
+        mocker.patch("server.send_text_msg", side_effect=RuntimeError("send_msg failed: window closed"))
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        assert task["status"] == "push_failed"
+
+    def test_pushed_task_is_not_pushed_again(self, mocker):
+        mocker.patch("server.time.sleep")
+        task = server._create_task("wmUser1", "查询阿里巴巴公司")
+        task["status"] = "pushed"
+
+        mocker.patch("server.sync_msg", return_value=self._sync_msg_with("你好"))
+        mock_send = mocker.patch("server.send_text_msg", return_value={"errcode": 0, "msgid": "m1"})
+
+        server._handle_kf_event("kftoken", "wkxxxxxxx")
+
+        sent_texts = [call.args[2] for call in mock_send.mock_calls]
+        assert "查询阿里巴巴公司任务已完成" not in sent_texts

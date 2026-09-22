@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest
 pytest-mock
+reportlab==5.0.1

@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 downloads/
+uploads/
 cursors.json
 .pytest_cache/
 key.pem

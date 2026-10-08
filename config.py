@@ -52,3 +52,11 @@ TASK_PROGRESS_INTERVAL_SECONDS = 1
 
 # 默认文本回复交给 LLM 生成时使用的系统提示词
 LLM_SYSTEM_PROMPT = "你是驿光科技的客服助手小光，用简洁友好的语气回复客户消息。"
+
+# 客户首次交互时推送的欢迎菜单消息
+WELCOME_MENU_HEAD = "您好，欢迎咨询，请选择您需要的服务："
+WELCOME_MENU_ITEMS = [
+    {"id": "1", "content": "企业交叉挖掘"},
+    {"id": "2", "content": "音频转录"},
+    {"id": "3", "content": "随便聊聊"},
+]

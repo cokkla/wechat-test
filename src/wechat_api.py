@@ -132,6 +132,28 @@ def send_link_msg(touser: str, open_kfid: str, title: str, desc: str, url: str, 
     return data
 
 
+def send_welcome_menu(welcome_code: str, head_content: str, menu_items: list[dict]) -> dict:
+    # 用「进入会话事件」返回的 welcome_code 发送欢迎菜单（须在收到事件后 20 秒内调用，且仅一次）
+    access_token = get_access_token()
+    resp = requests.post(
+        f"{WECHAT_API_BASE}/kf/send_msg_on_event",
+        params={"access_token": access_token},
+        json={
+            "code": welcome_code,
+            "msgtype": "msgmenu",
+            "msgmenu": {
+                "head_content": head_content,
+                "list": [{"type": "click", "click": item} for item in menu_items],
+            },
+        },
+        timeout=5,
+    )
+    data = resp.json()
+    if data.get("errcode"):
+        raise RuntimeError(f"send_msg_on_event failed: {data}")
+    return data
+
+
 def download_media(media_id: str, save_dir: str = "downloads") -> dict:
     """
     下载临时素材并保存到本地

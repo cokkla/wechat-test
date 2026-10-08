@@ -18,8 +18,25 @@ def handle_kf_event(kf_token: str, open_kfid: str) -> None:
 
     for msg in msgs:
         print(f"[receive] msg={msg}")
-        if msg.get("origin") == 3:
+        if msg.get("msgtype") == "event":
+            _handle_kf_event_msg(msg)
+        elif msg.get("origin") == 3:
             _handle_customer_msg(msg, open_kfid)
+
+
+def _handle_kf_event_msg(msg: dict) -> None:
+    event = msg.get("event", {})
+    if event.get("event_type") != "enter_session":
+        return
+
+    welcome_code = event.get("welcome_code")
+    if not welcome_code:
+        return  # 不满足发送欢迎语条件（48小时内已收过欢迎语，或已向客服发过消息）
+
+    try:
+        wechat_api.send_welcome_menu(welcome_code, config.WELCOME_MENU_HEAD, config.WELCOME_MENU_ITEMS)
+    except Exception as e:
+        print(f"[receive] send_welcome_menu error: {e}")
 
 
 def _handle_customer_msg(msg: dict, open_kfid: str) -> None:

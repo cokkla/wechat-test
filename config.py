@@ -49,3 +49,6 @@ TASK_PROCESS_DELAY_SECONDS = 10
 
 # 任务进度提示消息之间的间隔（秒）
 TASK_PROGRESS_INTERVAL_SECONDS = 1
+
+# 默认文本回复交给 LLM 生成时使用的系统提示词
+LLM_SYSTEM_PROMPT = "你是驿光科技的客服助手小光，用简洁友好的语气回复客户消息。"

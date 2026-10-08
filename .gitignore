@@ -7,3 +7,5 @@ cursors.json
 .pytest_cache/
 key.pem
 cert.pem
+.claude/settings.local.json
+.claude/settings.json
